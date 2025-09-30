@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Platformówka: Piesek i Zagadki — upgrade</title>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { display: grid; place-items: center; background: #f5f7fb; font-family: system-ui, Arial, sans-serif; }
+  #wrap { width: 960px; max-width: 95vw; }
+  .topbar {
+    display: flex; gap: 12px; align-items: center; justify-content: space-between;
+    margin: 8px 0 6px; padding: 8px 10px; border-radius: 14px;
+    background: #ffffff; box-shadow: 0 6px 20px rgba(0,0,0,.06);
+  }
+  .controls { font-size: 14px; color: #333 }
+  .controls kbd { background:#eef1ff; border:1px solid #cfd5ff; padding:2px 6px; border-radius:6px; }
+  .right { display: flex; gap: 8px; align-items: center; }
+  #file { display: none; }
+  .btn {
+    padding: 6px 10px; border-radius: 10px; border: 1px solid #e3e6ef; background: #fff;
+    cursor: pointer; font-size: 14px; transition:.15s ease-in-out box-shadow, .15s transform;
+  }
+  .btn:hover { box-shadow: 0 4px 14px rgba(0,0,0,.08) }
+  .btn:active { transform: translateY(1px) }
+  canvas { width: 960px; height: 540px; max-width: 95vw; aspect-ratio: 16/9;
+           background: linear-gradient(#bfe7ff 0%, #e7f6ff 45%, #f5f7fb 100%);
+           border-radius: 14px; box-shadow: 0 12px 32px rgba(0,0,0,.12); }
+
+  /* Level overlay fade styles */
+  #levelOverlay{
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255,255,255,0.9);
+    font-size: 48px;
+    color: #333;
+    font-weight: bold;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 400ms ease, visibility 400ms ease;
+    z-index: 10;
+    pointer-events: none;
+  }
+  #levelOverlay.show{
+    opacity: 1;
+    visibility: visible;
+  }
+
+
+  /* Touch controls (visible on touch devices) */
+  #touchControls{
+    position: fixed;
+    left: 0; right: 0; bottom: 16px;
+    display: none;
+    justify-content: center;
+    gap: 18px;
+    z-index: 20;
+    pointer-events: none; /* container doesn't catch touches */
+  }
+  .tc-btn{
+    pointer-events: auto; /* buttons are touchable */
+    width: 68px; height: 68px;
+    border-radius: 18px;
+    border: 1px solid #dfe3ef;
+    background: rgba(255,255,255,0.9);
+    box-shadow: 0 6px 18px rgba(0,0,0,.12);
+    font-size: 28px;
+    line-height: 1;
+    display: grid; place-items: center;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+  .tc-btn.jump{
+    width: 88px; height: 88px;
+    font-size: 34px;
+  }
+  @media (hover: none) and (pointer: coarse){
+    #touchControls{ display: flex; }
+  }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <div class="topbar">
+      <div class="controls">
+        <strong>Cel:</strong> Dotrzyj do <span aria-label="serduszko">❤</span> w prawym górnym rogu.<br/>
+        <strong>Sterowanie:</strong> 
+        <kbd>↑</kbd>/<kbd>↓</kbd> lub <kbd>←</kbd>/<kbd>→</kbd> – ruch, 
+        <kbd>Spacja</kbd>/<kbd>↑</kbd> – skok. Zatrzymaj się na pudełku <strong>?</strong>, aby rozwiązać zagadkę.
+      </div>
+      <div class="right">
+        <label class="btn" for="file">Wgraj własny sprite (PNG)</label>
+        <input id="file" type="file" accept="image/png,image/jpeg,image/webp" />
+        <button id="reset" class="btn">Reset poziomu</button>
+      </div>
+    </div>
+    <canvas id="game" width="960" height="540" aria-label="gra platformowa"></canvas>
+<div id="touchControls" aria-label="Sterowanie dotykowe">
+  <button id="btnLeft"  class="tc-btn" aria-label="Lewo">◀</button>
+  <button id="btnJump"  class="tc-btn jump" aria-label="Skok">⤒</button>
+  <button id="btnRight" class="tc-btn" aria-label="Prawo">▶</button>
+</div>
+<div id="levelOverlay">Poziom +1!</div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.imageSmoothingEnabled = false; // ostrzejszy pixel‑look
+
+  // --- Sound (WebAudio) ---
+  let actx;
+  const Sound = {
+    init(){ if(!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); },
+    beep(freq=660, dur=0.12, type='sine', vol=0.15){
+      if(!actx) return;
+      const osc = actx.createOscillator(), gain = actx.createGain();
+      osc.type = type; osc.frequency.value = freq; gain.gain.value = vol;
+      osc.connect(gain).connect(actx.destination);
+      const t = actx.currentTime; osc.start(t);
+      gain.gain.setValueAtTime(vol, t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+      osc.stop(t+dur);
+    },
+    play(name){
+      this.init(); if(!actx) return; if(actx.state==='suspended') actx.resume();
+      if(name==='jump'){ this.beep(740,0.09,'square',0.12); }
+      else if(name==='reward'){ this.beep(520,0.12,'triangle',0.16); }
+      else if(name==='win'){ this.beep(660,0.12,'sine',0.16); setTimeout(()=>this.beep(880,0.16,'square',0.18),110); }
+    }
+  };
+  document.addEventListener('keydown', ()=>{ Sound.init(); if(actx?.state==='suspended') actx.resume(); }, {once:false});
+
+  // --- Assets ---
+  const heart = { x: W - 80, y: 100, r: 18 }; // trochę niżej dla wygody
+  const cloudSeed = Math.random()*1000;
+
+  const playerImg = new Image();
+  let playerHasImage = false;
+  document.getElementById('file').addEventListener('change', (e) => {
+    const f = e.target.files[0]; if(!f) return;
+    const url = URL.createObjectURL(f);
+    playerImg.onload = () => { playerHasImage = true; };
+    playerImg.src = url;
+  });
+
+  // --- Level geometry ---
+  const platforms = [
+    {x: 0,   y: H-30, w: W,  h: 30, color: '#89c15f'}, // ground
+    {x: 60,  y: H-140, w: 160, h: 16},
+    {x: 260, y: H-210, w: 160, h: 16},
+    {x: 480, y: H-260, w: 160, h: 16},
+    {x: 690, y: H-320, w: 180, h: 16},
+    {x: 520, y: H-160, w: 120, h: 16},
+  ];
+
+  const boxes = [
+    {x: 60+90,  y: H-140-28, w: 28, h: 28, solved: false},
+    {x: 260+90, y: H-210-28, w: 28, h: 28, solved: false},
+    {x: 480+90, y: H-260-28, w: 28, h: 28, solved: false},
+    {x: 690+90, y: H-320-28, w: 28, h: 28, solved: false},
+  ];
+
+  // --- Player ---
+  const player = {
+    x: 24, y: H-60,
+    w: 34, h: 28,
+    vx: 0, vy: 0,
+    onGround: false,
+    prevGround: false,
+    dir: 1,             // 1 prawo, -1 lewo (do flipu)
+    solvedCount: 0,
+    level: 1,
+  };
+
+  const keys = new Set();
+  document.addEventListener('keydown', e => keys.add(e.code));
+  document.addEventListener('keyup', e => keys.delete(e.code));
+  document.getElementById('reset').addEventListener('click', () => resetLevel(true));
+
+  function resetLevel(hard=false){
+    player.x = 24; player.y = H-60; player.vx=0; player.vy=0; player.onGround=false;
+    if (hard){ boxes.forEach(b=>b.solved=false); player.solvedCount=0; }
+  }
+
+  // --- Physics (podkręcone skoki i lepsze sterowanie w locie) ---
+  const G = 0.65;      // nieco mniejsza grawitacja → dłuższy lot
+  const MOVE = 2.6;    // szybszy ruch poziomy
+  const JUMP = 14.5;   // WYŻSZY skok
+  const FRICTION = 0.82;
+  const AIRCTRL = 0.9; // lepsza kontrola w powietrzu
+
+  function rectsOverlap(a,b){ return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y; }
+
+  function handleInput(){
+    const left = keys.has('ArrowLeft') || keys.has('KeyA') || keys.has('ArrowUp');
+    const right = keys.has('ArrowRight') || keys.has('KeyD') || keys.has('ArrowDown');
+    const jumpPressed = keys.has('Space') || keys.has('ArrowUp');
+
+    const accel = player.onGround ? MOVE : MOVE * AIRCTRL;
+    if (left && !right) { player.vx = -accel; player.dir = -1; }
+    else if (right && !left) { player.vx = accel; player.dir = 1; }
+    else { player.vx *= player.onGround ? FRICTION : 0.985; }
+
+    if (jumpPressed && player.onGround){
+      player.vy = -JUMP;
+      player.onGround = false;
+      Sound.play('jump');
+      spawnDust(player.x + player.w/2, player.y + player.h, -1);
+    }
+  }
+
+  function applyPhysics(){
+    player.vy += G;
+    player.x += player.vx;
+    player.y += player.vy;
+
+    // world bounds
+    if (player.x < 0) player.x = 0;
+    if (player.x + player.w > W) player.x = W - player.w;
+    if (player.y > H) { resetLevel(); }
+
+    // collisions
+    const wasGround = player.onGround;
+    player.onGround = false;
+
+    // vertical resolution
+    for (const p of platforms){
+      if (rectsOverlap(player, p)){
+        if (player.vy > 0 && player.y + player.h - player.vy <= p.y){
+          // lądowanie na górze
+          player.y = p.y - player.h; player.vy = 0; player.onGround = true;
+          if (!wasGround) spawnDust(player.x + player.w/2, player.y + player.h, 1);
+        } else if (player.vy < 0 && player.y - player.vy >= p.y + p.h){
+          // uderzenie od dołu
+          player.y = p.y + p.h; player.vy = 0.2;
+        }
+      }
+    }
+    // horizontal resolution
+    for (const p of platforms){
+      if (rectsOverlap(player, p)){
+        if (player.vx > 0) player.x = p.x - player.w; else if (player.vx < 0) player.x = p.x + p.w;
+        player.vx = 0;
+      }
+    }
+  }
+
+  // --- Puzzles ---
+  function randomEquation(){
+    const a = Math.floor(2 + Math.random()*9); // 2..10
+    const b = Math.floor(a + 1 + Math.random()*10);
+    const type = Math.floor(Math.random()*4);
+    let text, answer;
+    switch(type){
+      case 0: text = `${a} + x = ${b}`; answer = (b - a); break;
+      case 1: { const bb = Math.floor(Math.random()*a); text = `${a} - x = ${bb}`; answer = (a - bb); break; }
+      case 2: text = `x + ${a} = ${b}`; answer = (b - a); break;
+      default: { const a2 = Math.floor(3 + Math.random()*7); const b2 = a2 + Math.floor(2 + Math.random()*8); text = `${a2} + x = ${b2}`; answer = (b2 - a2); }
+    }
+    return { text, answer };
+  }
+  for (const box of boxes){ const {text,answer}=randomEquation(); box.eq=text; box.ans=answer; }
+
+  function checkBoxes(){
+    for (const box of boxes){
+      if (box.solved) continue;
+      if (rectsOverlap(player, box)){
+        const user = prompt(`Zagadka: ${box.eq}\nPodaj wartość x:`);
+        if (user === null) return;
+        const ok = Number(user) === Number(box.ans);
+        if (ok){
+          box.solved = true; player.solvedCount++;
+          // zatrzymaj poziom, nagroda dźwięk, mały bounce
+          player.vx = 0; keys.clear();
+          player.vy = -6; player.onGround = false; Sound.play('reward');
+          // odsuń od pudełka
+          const pc = player.x + player.w/2, bc = box.x + box.w/2;
+          if (pc < bc) player.x = box.x - player.w - 2; else player.x = box.x + box.w + 2;
+        } else {
+          alert(`Niestety nie. Poprawna odpowiedź: x = ${box.ans}. Wracasz na początek!`);
+          resetLevel();
+        }
+      }
+    }
+  }
+
+  // --- Particles (pyłek) ---
+  const particles = [];
+  function spawnDust(x,y,dirY=-1){
+    for (let i=0;i<6;i++){
+      particles.push({
+        x, y,
+        vx: (Math.random()*2-1)*1.2,
+        vy: (Math.random()*0.6+0.4)*dirY,
+        life: 24
+      });
+    }
+  }
+  function drawParticles(){
+    for (let i=particles.length-1; i>=0; i--){
+      const p = particles[i];
+      p.x += p.vx; p.y += p.vy; p.vy += 0.08; p.life--;
+      ctx.globalAlpha = Math.max(p.life/24, 0) * 0.6;
+      ctx.fillStyle = '#000'; ctx.fillRect(p.x, p.y, 2, 2);
+      ctx.globalAlpha = 1;
+      if (p.life <= 0) particles.splice(i,1);
+    }
+  }
+
+  // --- Render helpers ---
+  function drawCloud(x,y,s){
+    ctx.beginPath();
+    ctx.arc(x, y, 12*s, 0, Math.PI*2);
+    ctx.arc(x+14*s, y+2*s, 16*s, 0, Math.PI*2);
+    ctx.arc(x+28*s, y, 12*s, 0, Math.PI*2);
+    ctx.fillStyle = '#ffffff'; ctx.fill();
+  }
+  function drawHills(){
+    ctx.save();
+    ctx.fillStyle = '#a6d5a1';
+    const baseY = H-50;
+    const t = Date.now()*0.00002;
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let x=0; x<=W; x+=10){
+      const y = baseY - Math.sin((x*0.01) + t)*8 - Math.cos((x*0.02) + t*0.7)*5;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  function drawFlowers(){
+    for (let i=0;i<8;i++){
+      const fx = 40 + i*110; const fy = H-36;
+      ctx.fillStyle = '#67a84e'; ctx.fillRect(fx+2, fy+8, 3, 10);
+      ctx.beginPath(); ctx.arc(fx, fy, 5, 0, Math.PI*2);
+      ctx.arc(fx+8, fy, 5, 0, Math.PI*2);
+      ctx.arc(fx+4, fy-6, 5, 0, Math.PI*2);
+      ctx.fillStyle = '#ffd6e7'; ctx.fill();
+    }
+  }
+  function drawPlatforms(){
+    for (const p of platforms){
+      ctx.fillStyle = p.color || '#a9c98a';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = '#d6e9c6'; ctx.fillRect(p.x, p.y, p.w, 3);
+    }
+  }
+  function drawBoxes(){
+    for (const b of boxes){
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.fillStyle = b.solved ? '#c7f7d4' : '#fff2a8';
+      ctx.strokeStyle = '#222';
+      ctx.lineWidth = 2;
+      ctx.fillRect(0,0,b.w,b.h);
+      ctx.strokeRect(0,0,b.w,b.h);
+      ctx.fillStyle = '#222';
+      ctx.font = 'bold 18px system-ui';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(b.solved ? '✓' : '?', b.w/2, b.h/2+1);
+      ctx.restore();
+    }
+  }
+  function drawHeart(){
+    const {x,y,r} = heart;
+    const allSolved = (player.solvedCount === boxes.length);
+    const pulse = allSolved ? (1 + 0.06*Math.sin(tAnim*8)) : 1;
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.scale(pulse, pulse);
+    ctx.fillStyle = '#ff3366'; // ZAWSZE czerwone
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(-r, -r, -2*r, r/3, 0, r);
+    ctx.bezierCurveTo(2*r, r/3, r, -r, 0, 0);
+    ctx.fill();
+    ctx.restore();
+  }
+  function drawPlayer(){
+    // cień
+    ctx.save();
+    ctx.globalAlpha = 0.2;
+    const shadowY = Math.min(player.y + player.h, H - 8);
+    ctx.beginPath();
+    ctx.ellipse(player.x + player.w/2, shadowY, player.w*0.45, 5, 0, 0, Math.PI*2);
+    ctx.fillStyle = '#000';
+    ctx.fill();
+    ctx.restore();
+
+    // piesek
+    ctx.save();
+    // flip w kierunku ruchu
+    ctx.translate(player.x + player.w/2, player.y);
+    ctx.scale(player.dir, 1);
+    const drawX = -player.w/2;
+
+    if (playerHasImage){
+      ctx.drawImage(playerImg, drawX, 0, player.w, player.h);
+    } else {
+      ctx.fillStyle = '#222';
+      if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(drawX,0,player.w,player.h,6); ctx.fill(); }
+      else { ctx.fillRect(drawX,0,player.w,player.h); }
+      // ogonek – delikatne machanie
+      ctx.fillStyle = '#fff';
+      const wag = Math.sin(tAnim * (player.onGround ? 10 : 16)) * 2;
+      ctx.fillRect(drawX + player.w - 7, 12 + wag, 4, 3);
+    }
+    ctx.restore();
+  }
+
+  function drawHUD(){
+    ctx.fillStyle = '#222';
+    ctx.font = 'bold 16px system-ui';
+    ctx.fillText(`Zagadki: ${player.solvedCount}/${boxes.length}`, 14, 24);
+    ctx.fillText(`Cel: ❤`, 14, 44);
+  
+    ctx.fillText(`Poziom: ${player.level}`, 14, 64);
+}
+
+  
+  // --- Level-up sound + overlay helpers ---
+  let __lvl_actx;
+  function levelUpSound(){
+    try{
+      if (window.Sound && typeof window.Sound.play === 'function'){
+        window.Sound.play('win');
+        return;
+      }
+      if (!__lvl_actx) __lvl_actx = new (window.AudioContext || window.webkitAudioContext)();
+      const t0 = __lvl_actx.currentTime;
+      function beep(freq, dur, type='sine', vol=0.18, start=0){
+        const osc = __lvl_actx.createOscillator();
+        const gain = __lvl_actx.createGain();
+        osc.type = type; osc.frequency.value = freq; gain.gain.value = vol;
+        osc.connect(gain).connect(__lvl_actx.destination);
+        const t = t0 + start;
+        osc.start(t);
+        gain.gain.setValueAtTime(vol, t);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        osc.stop(t + dur);
+      }
+      beep(660, 0.12, 'sine', 0.18, 0.00);
+      beep(880, 0.16, 'square', 0.20, 0.12);
+    }catch(e){}
+  }
+  function showLevelOverlay(){
+    const el = document.getElementById('levelOverlay');
+    if (!el) return;
+    try{ if (typeof __lvl_actx !== 'undefined' && __lvl_actx?.state === 'suspended') __lvl_actx.resume(); }catch(e){}
+    el.classList.add('show');
+    levelUpSound();
+    setTimeout(() => { el.classList.remove('show'); }, 1200);
+  }
+
+function maybeWin(){
+    // wygrana tylko po rozwiązaniu wszystkich zagadek
+    if (player.solvedCount !== boxes.length) return;
+    const px = player.x + player.w/2, py = player.y + player.h/2;
+    const dx = px - heart.x, dy = py - heart.y;
+    const d2 = dx*dx + dy*dy;
+    if (d2 < (heart.r+12)*(heart.r+12)){
+      Sound.play('win');
+      // nowe zagadki i twardy reset bez alertu
+      boxes.forEach(b => { const {text,answer}=randomEquation(); b.eq=text; b.ans=answer; b.solved=false; });
+      player.level++;
+      showLevelOverlay();
+      player.solvedCount = 0;
+      resetLevel(true);
+    }
+  }
+
+  // --- Background / main loop ---
+  let tAnim = 0;
+  function drawBackground(){
+    // chmurki
+    ctx.save();
+    const t = Date.now() * 0.00005;
+    for (let i=0;i<6;i++){
+      const x = ( (i*180 + (t+cloudSeed)*240) % (W+120) ) - 60;
+      const y = 60 + (i%3)*30;
+      drawCloud(x, y, 1 + (i%3)*0.15);
+    }
+    ctx.restore();
+    drawHills();
+    drawFlowers();
+  }
+
+  function frame(){
+    tAnim += 1/60;
+    ctx.clearRect(0,0,W,H);
+    drawBackground();
+    drawPlatforms();
+    drawBoxes();
+    drawHeart();
+
+    handleInput();
+    applyPhysics();
+    checkBoxes();
+    maybeWin();
+
+    drawParticles();
+    drawPlayer();
+    drawHUD();
+    requestAnimationFrame(frame);
+  }
+
+  frame();
+})();
+
+  // --- Touch controls mapping to keyboard Set ---
+  (function(){
+    const elL = document.getElementById('btnLeft');
+    const elR = document.getElementById('btnRight');
+    const elJ = document.getElementById('btnJump');
+
+    function bindHold(btn, code){
+      if (!btn) return;
+      const add = (e)=>{ e.preventDefault(); keys.add(code); };
+      const remove = (e)=>{ e.preventDefault(); keys.delete(code); };
+      btn.addEventListener('touchstart', add, {passive:false});
+      btn.addEventListener('touchend',   remove, {passive:false});
+      btn.addEventListener('touchcancel',remove, {passive:false});
+      // Also support mouse (for testing on desktop)
+      btn.addEventListener('mousedown', add);
+      window.addEventListener('mouseup', remove);
+      // Prevent focusing
+      btn.addEventListener('click', (e)=>e.preventDefault());
+    }
+
+    function bindTap(btn, code){
+      if (!btn) return;
+      const tap = (e)=>{
+        e.preventDefault();
+        // brief press
+        keys.add(code);
+        setTimeout(()=> keys.delete(code), 120);
+      };
+      btn.addEventListener('touchstart', tap, {passive:false});
+      btn.addEventListener('click', tap);
+    }
+
+    bindHold(elL, 'ArrowLeft');
+    bindHold(elR, 'ArrowRight');
+    // jump: simulate quick Space press to avoid auto-rejump when held
+    bindTap(elJ, 'Space');
+  })();
+
+</script>
+</body>
+</html>
